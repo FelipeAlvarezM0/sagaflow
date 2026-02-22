@@ -1,0 +1,11 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/shared" },
+    { "path": "apps/api" },
+    { "path": "apps/engine" },
+    { "path": "apps/mocks/payments" },
+    { "path": "apps/mocks/inventory" },
+    { "path": "apps/mocks/notifications" }
+  ]
+}

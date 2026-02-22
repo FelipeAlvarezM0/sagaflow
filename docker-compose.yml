@@ -1,0 +1,125 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: sagaflow
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d sagaflow"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/sagaflow
+      PAYMENTS_BASE_URL: http://payments:3001
+      INVENTORY_BASE_URL: http://inventory:3002
+      NOTIFICATIONS_BASE_URL: http://notifications:3003
+    command: >
+      sh -lc "npm run migrate && npm run seed"
+    restart: "no"
+
+  payments:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      PAYMENTS_PORT: 3001
+      FAIL_RATE: 0
+      FAIL_ONCE: "false"
+    command: ["npm", "run", "dev:payments"]
+    ports:
+      - "3001:3001"
+
+  inventory:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      INVENTORY_PORT: 3002
+      FAIL_RATE: 0
+      FAIL_ONCE: "false"
+    command: ["npm", "run", "dev:inventory"]
+    ports:
+      - "3002:3002"
+
+  notifications:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      NOTIFICATIONS_PORT: 3003
+      FAIL_RATE: 0
+      FAIL_ONCE: "false"
+    command: ["npm", "run", "dev:notifications"]
+    ports:
+      - "3003:3003"
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      payments:
+        condition: service_started
+      inventory:
+        condition: service_started
+      notifications:
+        condition: service_started
+    environment:
+      NODE_ENV: development
+      API_PORT: 3000
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/sagaflow
+      REDIS_URL: redis://redis:6379
+      ADMIN_TOKEN: change-me
+      LOG_SENSITIVE: "false"
+      OTEL_EXPORTER_OTLP_ENDPOINT: ""
+    command: ["npm", "run", "dev:api"]
+    ports:
+      - "3000:3000"
+
+  engine:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      api:
+        condition: service_started
+    environment:
+      NODE_ENV: development
+      ENGINE_PORT: 3100
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/sagaflow
+      ENGINE_POLL_INTERVAL_MS: 300
+      ENGINE_LEASE_TTL_MS: 15000
+      OTEL_EXPORTER_OTLP_ENDPOINT: ""
+    command: ["npm", "run", "dev:engine"]
+    ports:
+      - "3100:3100"
+
+volumes:
+  postgres_data:

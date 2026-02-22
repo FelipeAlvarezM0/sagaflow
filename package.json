@@ -1,0 +1,44 @@
+{
+  "name": "sagaflow",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Distributed Workflow / Saga Orchestrator in Node.js + TypeScript",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "workspaces": [
+    "apps/*",
+    "apps/mocks/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:api": "npm --workspace @sagaflow/api run dev",
+    "dev:engine": "npm --workspace @sagaflow/engine run dev",
+    "dev:payments": "npm --workspace @sagaflow/mock-payments run dev",
+    "dev:inventory": "npm --workspace @sagaflow/mock-inventory run dev",
+    "dev:notifications": "npm --workspace @sagaflow/mock-notifications run dev",
+    "migrate": "tsx scripts/migrate.ts",
+    "seed": "tsx scripts/seed.ts",
+    "lint": "eslint .",
+    "typecheck": "tsc -b --pretty false --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "dotenv": "^16.5.0",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "@typescript-eslint/eslint-plugin": "^8.26.0",
+    "@typescript-eslint/parser": "^8.26.0",
+    "eslint": "^9.22.0",
+    "tslib": "^2.8.1",
+    "tsx": "^4.20.4",
+    "typescript": "^5.8.2",
+    "vitest": "^3.0.8"
+  }
+}
+
