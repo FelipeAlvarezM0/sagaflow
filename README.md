@@ -1,31 +1,31 @@
 ﻿# SagaFlow
 
-SagaFlow es un **Distributed Workflow / Saga Orchestrator** backend-only en Node.js + TypeScript.
-Coordina workflows multi-paso entre servicios HTTP, con persistencia total en Postgres, retries seguros, compensaciones, idempotencia por step y observabilidad integral.
+SagaFlow is a **Distributed Workflow / Saga Orchestrator** backend-only project built with Node.js + TypeScript.
+It coordinates multi-step business workflows across HTTP services, with full PostgreSQL state persistence, safe retries, compensations, per-step idempotency, and observability-first design.
 
-## Qué resuelve
+## What it solves
 
-Ejecuta flujos como:
+SagaFlow runs workflows such as:
 
-`crear pedido -> cobrar -> reservar inventario -> notificar`
+`create order -> charge payment -> reserve inventory -> notify`
 
-Si un paso falla, SagaFlow aplica compensaciones en orden inverso para mantener consistencia (`refund`, `release inventory`, etc.).
+If a step fails, SagaFlow executes reverse-order compensations to preserve consistency (`refund`, `release inventory`, and others).
 
 ## Stack
 
 - Node.js 20+
 - TypeScript
-- Fastify (API y mocks)
-- PostgreSQL (estado crítico)
-- Redis (rate limiting admin)
-- Pino (logs)
+- Fastify (API and mocks)
+- PostgreSQL (critical state)
+- Redis (admin rate limiting)
+- Pino (logging)
 - OpenTelemetry (tracing)
 - Prometheus `/metrics`
 - Vitest (unit + integration)
 - Docker Compose
 - GitHub Actions (CI)
 
-## Arquitectura
+## Architecture
 
 ```text
 Client
@@ -45,9 +45,9 @@ Client
       [payments]            [inventory]          [notifications]
 ```
 
-El engine corre como servicio separado (`apps/engine`) y procesa la outbox de forma asíncrona.
+The engine runs as a separate service (`apps/engine`) and processes the outbox asynchronously.
 
-### Diagrama de secuencia
+### Sequence diagram
 
 ```mermaid
 sequenceDiagram
@@ -71,45 +71,45 @@ sequenceDiagram
   end
 ```
 
-### Principios clave
+### Core principles
 
-- No in-memory state crítico.
-- Outbox pattern para ejecución asíncrona resiliente.
-- `FOR UPDATE SKIP LOCKED` + leasing para múltiples instancias del engine.
-- Idempotencia por step vía `X-Idempotency-Key`.
-- Reintentos con backoff exponencial + jitter.
-- Compensaciones en orden inverso.
+- No critical in-memory state.
+- Outbox pattern for resilient asynchronous execution.
+- `FOR UPDATE SKIP LOCKED` + leasing for safe multi-worker processing.
+- Per-step idempotency via `X-Idempotency-Key`.
+- Retries with exponential backoff + jitter.
+- Reverse-order compensations.
 
 ## Delivery semantics
 
 - Step execution: at-least-once.
 - Compensation execution: at-least-once.
-- Run state transitions: exactly-once per transition (transactional update in Postgres).
+- Run state transitions: exactly-once per transition (transactional updates in Postgres).
 
 ## Failure model
 
-SagaFlow está diseñado para fallas parciales y recuperación automática:
+SagaFlow is designed for partial failures and automatic recovery:
 
-- Si el engine se cae durante un step:
-  - la fila de outbox queda `IN_FLIGHT` con lease.
-  - al expirar el lease, otro worker la retoma.
-  - la idempotencia por step evita efectos duplicados.
-- Si Postgres se reinicia:
-  - API y engine fallan temporalmente en `ready`.
-  - al volver Postgres, el engine reanuda desde outbox persistida.
-- Si downstream responde `5xx`:
-  - el intento se marca como fallo transitorio.
-  - se agenda retry con backoff exponencial + jitter.
-- Si hay timeout HTTP:
-  - se trata como retryable.
-  - se registra en `step_attempts` y se reprograma según política.
-- Si el proceso se reinicia en medio de compensación:
-  - la compensación pendiente permanece en outbox.
-  - otro ciclo/worker continúa desde estado persistido.
+- If the engine crashes during a step:
+  - the outbox row stays `IN_FLIGHT` with a lease.
+  - after lease expiry, another worker resumes it.
+  - per-step idempotency prevents duplicate side effects.
+- If Postgres restarts:
+  - API and engine fail readiness checks temporarily.
+  - after recovery, the engine resumes from persisted outbox state.
+- If a downstream service returns `5xx`:
+  - the attempt is marked as transient failure.
+  - a retry is scheduled using exponential backoff + jitter.
+- If HTTP times out:
+  - it is treated as retryable.
+  - the attempt is stored in `step_attempts` and rescheduled by policy.
+- If a process restarts during compensation:
+  - pending compensation remains in outbox.
+  - the next worker cycle continues from persisted state.
 
-## Modelo de datos
+## Data model
 
-Incluye tablas:
+Includes tables:
 
 - `workflow_definitions`
 - `workflow_runs`
@@ -117,16 +117,16 @@ Incluye tablas:
 - `step_attempts`
 - `outbox`
 
-Migración base: `migrations/sql/001_init.sql`.
+Base migration: `migrations/sql/001_init.sql`.
 
-Cómo se aplican migraciones:
+How migrations run:
 
-- Automático al levantar Docker Compose (servicio `migrate`).
-- Manual con `npm run migrate`.
+- Automatically when starting Docker Compose (the `migrate` service).
+- Manually with `npm run migrate`.
 
-## Endpoints principales
+## Main endpoints
 
-### Orquestación
+### Orchestration
 
 - `POST /v1/workflows/:name/start`
 - `GET /v1/runs/:runId`
@@ -135,15 +135,15 @@ Cómo se aplican migraciones:
 
 ### Admin
 
-- `POST /v1/admin/workflows` (requiere header `X-Admin-Token`)
+- `POST /v1/admin/workflows` (requires `X-Admin-Token`)
 
-### Operación
+### Operations
 
 - `GET /health`
-- `GET /ready` (verifica Postgres y Redis cuando Redis está configurado)
+- `GET /ready` (checks Postgres and Redis when Redis is configured)
 - `GET /metrics`
 
-## Ejemplos API (request/response)
+## API examples (request/response)
 
 ### Start run
 
@@ -166,7 +166,7 @@ curl -X POST http://localhost:3000/v1/workflows/order-processing/start \
   }'
 ```
 
-Respuesta esperada (`202 Accepted`):
+Expected response (`202 Accepted`):
 
 ```json
 {
@@ -175,13 +175,13 @@ Respuesta esperada (`202 Accepted`):
 }
 ```
 
-### Consultar estado
+### Get run status
 
 ```bash
 curl http://localhost:3000/v1/runs/<RUN_ID>
 ```
 
-Respuesta ejemplo:
+Example response:
 
 ```json
 {
@@ -203,7 +203,7 @@ Respuesta ejemplo:
 }
 ```
 
-## Workflows demo incluidos
+## Included demo workflows
 
 - `order-processing@1.0.0`
   - `charge-payment` (comp: `refund-payment`)
@@ -218,21 +218,21 @@ Respuesta ejemplo:
   - `emit-fiscal-doc`
   - `archive`
 
-## Correr local
+## Run locally
 
-1. Copia variables:
+1. Copy environment variables:
 
 ```bash
 cp .env.example .env
 ```
 
-2. Levanta stack:
+2. Start the stack:
 
 ```bash
 docker compose up -d --build
 ```
 
-3. Verifica:
+3. Verify:
 
 ```bash
 curl http://localhost:3000/health
@@ -240,29 +240,29 @@ curl http://localhost:3000/ready
 curl http://localhost:3000/metrics
 ```
 
-## Demos reproducibles
+## Reproducible demos
 
-Requieren `jq` y `bash`.
+Requires `jq` and `bash`.
 
-### Éxito
+### Success
 
 ```bash
 bash scripts/demo-order-success.sh
 ```
 
-### Falla + compensación
+### Failure + compensation
 
 ```bash
 bash scripts/demo-order-fail-compensate.sh
 ```
 
-## Observabilidad
+## Observability
 
 ### Logs (Pino)
 
-Incluyen: `correlationId`, `runId`, `workflowName`, `stepId`, transiciones y reintentos.
+Includes: `correlationId`, `runId`, `workflowName`, `stepId`, state transitions, and retry scheduling.
 
-### Métricas
+### Metrics
 
 - `workflow_runs_started_total`
 - `workflow_runs_completed_total`
@@ -278,27 +278,27 @@ Incluyen: `correlationId`, `runId`, `workflowName`, `stepId`, transiciones y rei
 
 ### Tracing
 
-- Span por request HTTP.
-- Span por ejecución de step y compensación.
-- Atributos: `runId`, `stepId`, `attemptNo`, `http.status`.
+- One span per HTTP request.
+- One span per step execution and compensation.
+- Attributes: `runId`, `stepId`, `attemptNo`, `http.status`.
 
-## Seguridad básica
+## Basic security
 
-- Endpoints admin protegidos por `X-Admin-Token`.
-- Rate limit en admin endpoints.
-- Redacción de campos sensibles configurable (`LOG_SENSITIVE`).
+- Admin endpoints protected with `X-Admin-Token`.
+- Rate limiting on admin endpoints.
+- Configurable sensitive-field log redaction (`LOG_SENSITIVE`).
 
-## Calidad y CI
+## Quality and CI
 
-CI (`.github/workflows/ci.yml`) ejecuta:
+CI (`.github/workflows/ci.yml`) runs:
 
 - lint
 - typecheck
 - unit tests
-- integration tests con Docker Compose
-- scripts demo
+- integration tests with Docker Compose
+- demo scripts
 
-## Scripts útiles
+## Useful scripts
 
 - `npm run migrate`
 - `npm run seed`
@@ -306,50 +306,50 @@ CI (`.github/workflows/ci.yml`) ejecuta:
 - `npm run dev:engine`
 - `npm run test`
 
-## Decisiones técnicas
+## Technical decisions
 
-- **Outbox**: garantiza recuperación y reanudación tras caída del engine.
-- **Leasing + SKIP LOCKED**: evita doble procesamiento en horizontal scaling.
-- **Idempotency per-step**: minimiza efectos duplicados en reintentos.
-- **Estado en Postgres**: trazabilidad completa y replay-friendly.
+- **Outbox**: guarantees recovery and continuation after engine crashes.
+- **Leasing + SKIP LOCKED**: prevents duplicate processing in horizontal scaling.
+- **Per-step idempotency**: minimizes duplicate side effects during retries.
+- **Postgres state**: full traceability and replay-friendly execution.
 
-## Naming y convenciones
+## Naming and conventions
 
-- Servicios: `sagaflow-api`, `sagaflow-engine`, `mock-payments`, `mock-inventory`, `mock-notifications`.
-- Puertos por defecto:
+- Services: `sagaflow-api`, `sagaflow-engine`, `mock-payments`, `mock-inventory`, `mock-notifications`.
+- Default ports:
   - API `3000`
   - Engine metrics/health `3100`
   - Payments `3001`
   - Inventory `3002`
   - Notifications `3003`
-- Métricas Prometheus con prefijo de dominio workflow/outbox/step para facilitar dashboards.
-- Tracing OTEL por servicio para separar spans de API y engine.
+- Prometheus metric names grouped by workflow/outbox/step domain.
+- OTEL tracing split by service for API vs engine span separation.
 
-## Production Readiness Checklist
+## Production readiness checklist
 
-- [x] Estado crítico persistido en Postgres (sin estado crítico en memoria).
-- [x] Ejecución asíncrona resiliente con outbox.
-- [x] Locks/leases para procesamiento seguro en paralelo.
-- [x] Retries con backoff exponencial + jitter.
-- [x] Compensaciones en orden inverso ante fallo.
-- [x] Métricas, logs y tracing instrumentados.
-- [x] CI con lint, typecheck y pruebas.
-- [x] Demos reproducibles para éxito y compensación.
+- [x] Critical state persisted in Postgres (no critical in-memory state).
+- [x] Resilient asynchronous execution via outbox.
+- [x] Safe multi-worker processing with locks/leases.
+- [x] Retries with exponential backoff + jitter.
+- [x] Reverse-order compensations on failures.
+- [x] Metrics, logs, and tracing instrumentation.
+- [x] CI with lint, typecheck, and tests.
+- [x] Reproducible success and compensation demos.
 
-## Licencia
+## License
 
-MIT. Ver `LICENSE`.
+MIT. See `LICENSE`.
 
-## Future Work
+## Future work
 
-- DSL visual de workflows.
-- Signals/events externos por run.
+- Visual workflow DSL.
+- External signals/events per run.
 - Cron/temporal steps.
-- UI de timeline en tiempo real.
-- Dead-letter queue para outbox fallido.
+- Real-time timeline UI.
+- Dead-letter queue for failed outbox items.
 
 ## Known limits
 
-- Diseñado para miles de runs concurrentes en entorno estándar.
-- No está optimizado para millones de workflows de larga duración.
-- Actions actuales son HTTP; no hay soporte nativo gRPC todavía.
+- Designed for thousands of concurrent runs on standard setups.
+- Not optimized for millions of long-lived workflows.
+- Current actions are HTTP-only (no native gRPC support yet).
