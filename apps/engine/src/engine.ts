@@ -25,6 +25,11 @@ interface RunExecutionRow {
   context_json: Record<string, unknown>;
 }
 
+interface RunTimingRow {
+  workflow_name: string;
+  created_at: Date;
+}
+
 interface StepRow {
   step_id: string;
   status: string;
@@ -188,6 +193,13 @@ export class SagaEngine {
 
     const row = result.rows[0];
     metrics.setOutbox(Number(row?.backlog ?? 0), Number(row?.lag_seconds ?? 0));
+
+    const activeResult = await query<{ active_runs: string }>(
+      `SELECT COUNT(*)::text AS active_runs
+       FROM workflow_runs
+       WHERE status IN ('PENDING', 'RUNNING', 'COMPENSATING')`
+    );
+    metrics.setWorkflowActiveRuns(Number(activeResult.rows[0]?.active_runs ?? 0));
   }
 
   private async processOutboxMessage(message: OutboxRecord): Promise<void> {
@@ -335,7 +347,7 @@ export class SagaEngine {
     metrics.stepLatencyMs.observe({ stepId: payload.stepId }, execution.durationMs);
 
     if (execution.ok) {
-      await withTransaction(async (client) => {
+      const completionRow = await withTransaction(async (client) => {
         await client.query(
           `INSERT INTO step_attempts (run_id, step_id, attempt_no, attempt_type, status, http_status, duration_ms, error_message)
            VALUES ($1, $2, $3, 'ACTION', 'SUCCESS', $4, $5, NULL)
@@ -367,19 +379,25 @@ export class SagaEngine {
              VALUES ($1, 'EXECUTE_STEP', $2, 'PENDING', NOW())`,
             [run.id, nextPayload]
           );
+          return null;
         } else {
-          await client.query(
+          const completedUpdate = await client.query<RunTimingRow>(
             `UPDATE workflow_runs
              SET status = 'COMPLETED', updated_at = NOW(), error_code = NULL, error_message = NULL
-             WHERE id = $1`,
+             WHERE id = $1
+               AND status <> 'COMPLETED'
+             RETURNING workflow_name, created_at`,
             [run.id]
           );
-
-          metrics.workflowRunsCompletedTotal.inc();
+          return completedUpdate.rows[0] ?? null;
         }
       });
 
       metrics.stepAttemptsTotal.inc({ stepId: payload.stepId, status: 'SUCCESS' });
+      if (completionRow) {
+        metrics.workflowRunsCompletedTotal.inc();
+        this.observeRunDuration(completionRow.workflow_name, completionRow.created_at, 'COMPLETED');
+      }
 
       logger.info(
         {
@@ -415,8 +433,7 @@ export class SagaEngine {
     const decision = isTransientFailure(transientInput);
 
     const shouldRetry = decision.retryable && attemptNo < stepDefinition.retryPolicy.maxAttempts;
-
-    await withTransaction(async (client) => {
+    const failureOutcome = await withTransaction(async (client) => {
       await client.query(
         `INSERT INTO step_attempts (run_id, step_id, attempt_no, attempt_type, status, http_status, duration_ms, error_message)
          VALUES ($1, $2, $3, 'ACTION', 'FAIL', $4, $5, $6)
@@ -466,7 +483,7 @@ export class SagaEngine {
           'step failed, retry scheduled'
         );
 
-        return;
+        return { retryScheduled: true, terminalFailure: null as RunTimingRow | null };
       }
 
       if (stepDefinition.onFailure === 'compensate') {
@@ -514,21 +531,33 @@ export class SagaEngine {
             'step failed, compensation started'
           );
 
-          return;
+          return { retryScheduled: false, terminalFailure: null as RunTimingRow | null };
         }
       }
 
-      await client.query(
-        `UPDATE workflow_runs
+      const failedUpdate = await client.query<RunTimingRow>(
+        `UPDATE workflow_runs w
          SET status = 'FAILED', updated_at = NOW(), error_code = 'STEP_FAILED', error_message = $2
-         WHERE id = $1`,
+         WHERE id = $1
+           AND status <> 'FAILED'
+        RETURNING w.workflow_name, w.created_at`,
         [run.id, execution.errorMessage ?? `Step ${payload.stepId} failed`]
       );
-
-      metrics.workflowRunsFailedTotal.inc();
+      return { retryScheduled: false, terminalFailure: failedUpdate.rows[0] ?? null };
     });
 
     metrics.stepAttemptsTotal.inc({ stepId: payload.stepId, status: 'FAIL' });
+    if (failureOutcome.retryScheduled) {
+      metrics.stepRetriesTotal.inc({ stepId: payload.stepId, attemptType: 'ACTION' });
+    }
+    if (failureOutcome.terminalFailure !== null) {
+      metrics.workflowRunsFailedTotal.inc();
+      this.observeRunDuration(
+        failureOutcome.terminalFailure.workflow_name,
+        failureOutcome.terminalFailure.created_at,
+        'FAILED'
+      );
+    }
   }
 
   private async handleExecuteCompensation(payload: OutboxPayloadCompensate): Promise<void> {
@@ -763,6 +792,7 @@ export class SagaEngine {
     if (shouldRetry) {
       const delay = computeBackoffMs(stepDefinition.retryPolicy, attemptNo);
       await this.scheduleCompensation(run.id, payload.queue, payload.reason, delay);
+      metrics.stepRetriesTotal.inc({ stepId: currentStepId, attemptType: 'COMPENSATION' });
       logger.warn(
         {
           runId: run.id,
@@ -806,34 +836,49 @@ export class SagaEngine {
   }
 
   private async markRunCompensated(runId: string): Promise<void> {
-    const result = await query(
+    const result = await query<RunTimingRow>(
       `UPDATE workflow_runs
        SET status = 'COMPENSATED',
            updated_at = NOW()
        WHERE id = $1
-         AND status <> 'COMPENSATED'`,
+         AND status <> 'COMPENSATED'
+       RETURNING workflow_name, created_at`,
       [runId]
     );
 
-    if (result.rowCount && result.rowCount > 0) {
+    const updated = result.rows[0];
+    if (updated) {
       getMetrics().workflowRunsCompensatedTotal.inc();
+      this.observeRunDuration(updated.workflow_name, updated.created_at, 'COMPENSATED');
     }
   }
 
   private async failRun(runId: string, code: string, message: string): Promise<void> {
-    const result = await query(
+    const result = await query<RunTimingRow>(
       `UPDATE workflow_runs
        SET status = 'FAILED',
            updated_at = NOW(),
            error_code = $2,
            error_message = $3
        WHERE id = $1
-         AND status <> 'FAILED'`,
+         AND status <> 'FAILED'
+       RETURNING workflow_name, created_at`,
       [runId, code, message]
     );
 
-    if (result.rowCount && result.rowCount > 0) {
+    const updated = result.rows[0];
+    if (updated) {
       getMetrics().workflowRunsFailedTotal.inc();
+      this.observeRunDuration(updated.workflow_name, updated.created_at, 'FAILED');
     }
+  }
+
+  private observeRunDuration(
+    workflowName: string,
+    createdAt: Date,
+    status: 'COMPLETED' | 'FAILED' | 'COMPENSATED' | 'CANCELLED'
+  ): void {
+    const durationSeconds = Math.max(0, (Date.now() - createdAt.getTime()) / 1000);
+    getMetrics().workflowRunDurationSeconds.observe({ workflowName, status }, durationSeconds);
   }
 }

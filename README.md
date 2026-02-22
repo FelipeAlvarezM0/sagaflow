@@ -47,6 +47,30 @@ Client
 
 El engine corre como servicio separado (`apps/engine`) y procesa la outbox de forma asíncrona.
 
+### Diagrama de secuencia
+
+```mermaid
+sequenceDiagram
+  participant C as Client
+  participant A as API
+  participant P as Postgres
+  participant E as Engine
+  participant D as Downstream Service
+
+  C->>A: POST /v1/workflows/:name/start
+  A->>P: tx(run + run_steps + outbox)
+  A-->>C: 202 Accepted (runId)
+  E->>P: poll outbox (lease + SKIP LOCKED)
+  E->>D: execute step HTTP
+  D-->>E: response (2xx/4xx/5xx/timeout)
+  E->>P: persist attempt + update state
+  alt success and more steps
+    E->>P: enqueue next step
+  else failure with compensation
+    E->>P: enqueue compensation (reverse order)
+  end
+```
+
 ### Principios clave
 
 - No in-memory state crítico.
@@ -55,6 +79,33 @@ El engine corre como servicio separado (`apps/engine`) y procesa la outbox de fo
 - Idempotencia por step vía `X-Idempotency-Key`.
 - Reintentos con backoff exponencial + jitter.
 - Compensaciones en orden inverso.
+
+## Delivery semantics
+
+- Step execution: at-least-once.
+- Compensation execution: at-least-once.
+- Run state transitions: exactly-once per transition (transactional update in Postgres).
+
+## Failure model
+
+SagaFlow está diseñado para fallas parciales y recuperación automática:
+
+- Si el engine se cae durante un step:
+  - la fila de outbox queda `IN_FLIGHT` con lease.
+  - al expirar el lease, otro worker la retoma.
+  - la idempotencia por step evita efectos duplicados.
+- Si Postgres se reinicia:
+  - API y engine fallan temporalmente en `ready`.
+  - al volver Postgres, el engine reanuda desde outbox persistida.
+- Si downstream responde `5xx`:
+  - el intento se marca como fallo transitorio.
+  - se agenda retry con backoff exponencial + jitter.
+- Si hay timeout HTTP:
+  - se trata como retryable.
+  - se registra en `step_attempts` y se reprograma según política.
+- Si el proceso se reinicia en medio de compensación:
+  - la compensación pendiente permanece en outbox.
+  - otro ciclo/worker continúa desde estado persistido.
 
 ## Modelo de datos
 
@@ -89,7 +140,7 @@ Cómo se aplican migraciones:
 ### Operación
 
 - `GET /health`
-- `GET /ready`
+- `GET /ready` (verifica Postgres y Redis cuando Redis está configurado)
 - `GET /metrics`
 
 ## Ejemplos API (request/response)
@@ -217,7 +268,10 @@ Incluyen: `correlationId`, `runId`, `workflowName`, `stepId`, transiciones y rei
 - `workflow_runs_completed_total`
 - `workflow_runs_failed_total`
 - `workflow_runs_compensated_total`
+- `workflow_run_duration_seconds{workflowName,status}`
+- `workflow_active_runs`
 - `step_attempts_total{stepId,status}`
+- `step_retries_total{stepId,attemptType}`
 - `step_latency_ms`
 - `outbox_backlog_total`
 - `outbox_lag_seconds`
@@ -259,6 +313,18 @@ CI (`.github/workflows/ci.yml`) ejecuta:
 - **Idempotency per-step**: minimiza efectos duplicados en reintentos.
 - **Estado en Postgres**: trazabilidad completa y replay-friendly.
 
+## Naming y convenciones
+
+- Servicios: `sagaflow-api`, `sagaflow-engine`, `mock-payments`, `mock-inventory`, `mock-notifications`.
+- Puertos por defecto:
+  - API `3000`
+  - Engine metrics/health `3100`
+  - Payments `3001`
+  - Inventory `3002`
+  - Notifications `3003`
+- Métricas Prometheus con prefijo de dominio workflow/outbox/step para facilitar dashboards.
+- Tracing OTEL por servicio para separar spans de API y engine.
+
 ## Production Readiness Checklist
 
 - [x] Estado crítico persistido en Postgres (sin estado crítico en memoria).
@@ -281,3 +347,9 @@ MIT. Ver `LICENSE`.
 - Cron/temporal steps.
 - UI de timeline en tiempo real.
 - Dead-letter queue para outbox fallido.
+
+## Known limits
+
+- Diseñado para miles de runs concurrentes en entorno estándar.
+- No está optimizado para millones de workflows de larga duración.
+- Actions actuales son HTTP; no hay soporte nativo gRPC todavía.

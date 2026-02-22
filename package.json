@@ -22,7 +22,7 @@
     "migrate": "tsx scripts/migrate.ts",
     "seed": "tsx scripts/seed.ts",
     "lint": "eslint .",
-    "typecheck": "tsc -b --pretty false --noEmit",
+    "typecheck": "tsc -b --pretty false",
     "test": "vitest run",
     "test:watch": "vitest"
   },

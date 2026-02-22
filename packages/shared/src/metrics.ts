@@ -13,7 +13,10 @@ export interface SagaMetrics {
   workflowRunsCompletedTotal: Counter;
   workflowRunsFailedTotal: Counter;
   workflowRunsCompensatedTotal: Counter;
+  workflowRunDurationSeconds: Histogram<'workflowName' | 'status'>;
+  workflowActiveRuns: Gauge;
   stepAttemptsTotal: Counter<'stepId' | 'status'>;
+  stepRetriesTotal: Counter<'stepId' | 'attemptType'>;
   stepLatencyMs: Histogram<'stepId'>;
   outboxBacklogTotal: Gauge;
   outboxLagSeconds: Gauge;
@@ -21,7 +24,9 @@ export interface SagaMetrics {
 
 export interface MetricsSetters {
   setOutbox(backlog: number, lagSeconds: number): void;
+  setWorkflowActiveRuns(value: number): void;
   incStepAttempt(stepId: string, status: string): void;
+  incStepRetry(stepId: string, attemptType: 'ACTION' | 'COMPENSATION'): void;
 }
 
 let metricsCache: SagaMetrics | undefined;
@@ -56,10 +61,28 @@ export function getMetrics(): SagaMetrics {
       help: 'Total compensated workflow runs',
       registers: [registry]
     }),
+    workflowRunDurationSeconds: new Histogram({
+      name: 'workflow_run_duration_seconds',
+      help: 'Workflow run duration in seconds for terminal runs',
+      labelNames: ['workflowName', 'status'],
+      buckets: [0.1, 0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600],
+      registers: [registry]
+    }),
+    workflowActiveRuns: new Gauge({
+      name: 'workflow_active_runs',
+      help: 'Current number of non-terminal workflow runs',
+      registers: [registry]
+    }),
     stepAttemptsTotal: new Counter({
       name: 'step_attempts_total',
       help: 'Total step attempts by step and status',
       labelNames: ['stepId', 'status'],
+      registers: [registry]
+    }),
+    stepRetriesTotal: new Counter({
+      name: 'step_retries_total',
+      help: 'Total scheduled step retries by step and attempt type',
+      labelNames: ['stepId', 'attemptType'],
       registers: [registry]
     }),
     stepLatencyMs: new Histogram({
@@ -91,8 +114,14 @@ export function createMetricHelpers(): MetricsSetters {
       metrics.outboxBacklogTotal.set(backlog);
       metrics.outboxLagSeconds.set(lagSeconds);
     },
+    setWorkflowActiveRuns(value: number) {
+      metrics.workflowActiveRuns.set(value);
+    },
     incStepAttempt(stepId: string, status: string) {
       metrics.stepAttemptsTotal.inc({ stepId, status } as LabelValues<'stepId' | 'status'>);
+    },
+    incStepRetry(stepId: string, attemptType: 'ACTION' | 'COMPENSATION') {
+      metrics.stepRetriesTotal.inc({ stepId, attemptType } as LabelValues<'stepId' | 'attemptType'>);
     }
   };
 }

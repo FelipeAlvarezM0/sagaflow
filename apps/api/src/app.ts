@@ -135,10 +135,32 @@ export async function buildApiServer() {
   app.get('/ready', async (_req, reply) => {
     try {
       await query('SELECT 1');
-      return { status: 'ready' };
+      let redisDependency: 'ok' | 'disabled' = 'disabled';
+      if (redis) {
+        const pong = await redis.ping();
+        if (pong !== 'PONG') {
+          throw new Error(`unexpected redis ping response: ${pong}`);
+        }
+        redisDependency = 'ok';
+      }
+
+      return {
+        status: 'ready',
+        dependencies: {
+          postgres: 'ok',
+          redis: redisDependency
+        }
+      };
     } catch (error) {
       reply.code(503);
-      return { status: 'not_ready', error: String(error) };
+      return {
+        status: 'not_ready',
+        error: String(error),
+        dependencies: {
+          postgres: 'unknown',
+          redis: redis ? 'unknown' : 'disabled'
+        }
+      };
     }
   });
 
@@ -403,7 +425,7 @@ export async function buildApiServer() {
     const runId = params.data.runId;
     const compensate = body.data.compensate ?? true;
 
-    await withTransaction(async (client) => {
+    const terminalStatus = await withTransaction(async (client) => {
       const runRes = await client.query<RunRow>(
         `SELECT id, workflow_name, workflow_version, status, input_json, context_json, error_code, error_message, created_at, updated_at
          FROM workflow_runs
@@ -430,7 +452,7 @@ export async function buildApiServer() {
            WHERE id = $1`,
           [runId]
         );
-        return;
+        return 'CANCELLED' as const;
       }
 
       const definition = await getDefinition(run.workflow_name, run.workflow_version);
@@ -455,7 +477,7 @@ export async function buildApiServer() {
            WHERE id = $1`,
           [runId]
         );
-        return;
+        return 'CANCELLED' as const;
       }
 
       await client.query(
@@ -472,6 +494,7 @@ export async function buildApiServer() {
          VALUES ($1, 'EXECUTE_COMPENSATION', $2, 'PENDING', NOW())`,
         [runId, payload]
       );
+      return 'COMPENSATING' as const;
     }).catch((error) => {
       const message = (error as Error).message;
       if (message === 'run_not_found') {
@@ -489,8 +512,29 @@ export async function buildApiServer() {
       throw error;
     });
 
+    if (!terminalStatus) {
+      return;
+    }
+
+    if (terminalStatus === 'CANCELLED') {
+      const runRow = await query<{ workflow_name: string; created_at: Date }>(
+        `SELECT workflow_name, created_at
+         FROM workflow_runs
+         WHERE id = $1`,
+        [runId]
+      );
+      const row = runRow.rows[0];
+      if (row) {
+        const elapsedSeconds = Math.max(0, (Date.now() - row.created_at.getTime()) / 1000);
+        getMetrics().workflowRunDurationSeconds.observe(
+          { workflowName: row.workflow_name, status: 'CANCELLED' },
+          elapsedSeconds
+        );
+      }
+    }
+
     reply.code(202);
-    return { runId, status: compensate ? 'COMPENSATING' : 'CANCELLED' };
+    return { runId, status: terminalStatus };
   });
 
   app.addHook('onClose', async () => {
